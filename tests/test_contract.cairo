@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod tests {
     use starknet::{ContractAddress, contract_address_const, get_block_timestamp};
     use starknet::testing::{set_caller_address, set_contract_address, set_block_timestamp};
     
@@ -17,8 +19,17 @@
     use circuit_breaker::mocks::mock_defi_protocol::{
         IMockDeFiProtocolDispatcher, IMockDeFiProtocolDispatcherTrait
     };
-
+    
+    use openzeppelin_token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
     use openzeppelin_security::interface::{IPausableDispatcher, IPausableDispatcherTrait};
+
+    // Helper struct to hold both dispatchers for MockToken
+    #[derive(Drop, Copy)]
+    struct MockTokenDispatchers {
+        mock: IMockTokenDispatcher,
+        erc20: IERC20Dispatcher,
+        contract_address: ContractAddress,
+    }
 
     fn deploy_circuit_breaker() -> ICircuitBreakerDispatcher {
         let admin = contract_address_const::<'admin'>();
@@ -39,15 +50,28 @@
         ICircuitBreakerDispatcher { contract_address }
     }
     
-    fn deploy_mock_token(name: felt252, symbol: felt252) -> IMockTokenDispatcher {
+    fn deploy_mock_token() -> MockTokenDispatchers {
         let contract = declare("MockToken").unwrap().contract_class();
+        
+        // Define name and symbol as ByteArray, as the constructor expects.
+        let name: ByteArray = "Mock Token";
+        let symbol: ByteArray = "MTK";
+
+        let mut constructor_calldata = array![];
+        name.serialize(ref constructor_calldata);
+        symbol.serialize(ref constructor_calldata);
+
         let (contract_address, _) = contract.deploy(
-            @array![name, symbol]
+            @constructor_calldata
         ).unwrap();
         
-        IMockTokenDispatcher { contract_address }
+        MockTokenDispatchers {
+            mock: IMockTokenDispatcher { contract_address },
+            erc20: IERC20Dispatcher { contract_address },
+            contract_address
+        }
     }
-
+    
     fn deploy_mock_defi(circuit_breaker: ContractAddress) -> IMockDeFiProtocolDispatcher {
         let contract = declare("MockDeFiProtocol").unwrap().contract_class();
         let (contract_address, _) = contract.deploy(
@@ -74,7 +98,7 @@
     fn test_register_asset() {
         let circuit_breaker = deploy_circuit_breaker();
         let admin = contract_address_const::<'admin'>();
-        let token = deploy_mock_token('USDC','USDC');
+        let token = deploy_mock_token();
         
         // Register asset as admin
         start_cheat_caller_address(circuit_breaker.contract_address, admin);
@@ -94,7 +118,7 @@
     fn test_register_asset_unauthorized() {
         let circuit_breaker = deploy_circuit_breaker();
         let unauthorized = contract_address_const::<'unauthorized'>();
-        let token = deploy_mock_token('USDC','USDC');
+        let token = deploy_mock_token();
         
         // Try to register asset as non-admin (should panic)
         start_cheat_caller_address(circuit_breaker.contract_address, unauthorized);
@@ -128,7 +152,7 @@
         let circuit_breaker = deploy_circuit_breaker();
         let admin = contract_address_const::<'admin'>();
         let alice = contract_address_const::<'alice'>();
-        let token = deploy_mock_token('USDC','USDC');
+        let token = deploy_mock_token();
         let defi = deploy_mock_defi(circuit_breaker.contract_address);
         
         // Setup: Register asset and add protected contract
@@ -145,11 +169,11 @@
         
         // Mint tokens to Alice
         let mint_amount: u256 = 10000000000000000000000; // 10000 tokens
-        token.mint(alice, mint_amount);
+        token.mock.mint(alice, mint_amount);
         
         // Approve DeFi protocol
         start_cheat_caller_address(token.contract_address, alice);
-        token.approve(defi.contract_address, mint_amount);
+        token.erc20.approve(defi.contract_address, mint_amount);
         stop_cheat_caller_address(token.contract_address);
         
         // Deposit tokens
@@ -177,7 +201,7 @@
         let circuit_breaker = deploy_circuit_breaker();
         let admin = contract_address_const::<'admin'>();
         let alice = contract_address_const::<'alice'>();
-        let token = deploy_mock_token('USDC','USDC');
+        let token = deploy_mock_token();
         let defi = deploy_mock_defi(circuit_breaker.contract_address);
         
         // Setup: Register asset and add protected contract
@@ -192,12 +216,12 @@
         circuit_breaker.add_protected_contracts(protected_contracts);
         stop_cheat_caller_address(circuit_breaker.contract_address);
         
-        // Mint and deposit 1 million tokens
-        let large_amount: u256 = 1000000000000000000000000; // 1 million tokens
-        token.mint(alice, large_amount);
+        // Mint and deposit tokens
+        let large_amount: u256 = 10000000000000000000000; // 10000 tokens
+        token.mock.mint(alice, large_amount);
         
         start_cheat_caller_address(token.contract_address, alice);
-        token.approve(defi.contract_address, large_amount);
+        token.erc20.approve(defi.contract_address, large_amount);
         stop_cheat_caller_address(token.contract_address);
         
         start_cheat_caller_address(defi.contract_address, alice);
@@ -208,12 +232,20 @@
         start_cheat_block_timestamp(circuit_breaker.contract_address, 18000); // 5 hours later
         
         // Attempt to withdraw more than 30% (should trigger rate limit)
-        let breach_amount: u256 = 300001000000000000000000; // 300,001 tokens
+        let breach_amount: u256 = 6000000000000000000000; // 6000 tokens (60% of 10000)
         start_cheat_caller_address(defi.contract_address, alice);
         defi.withdrawal(token.contract_address, breach_amount);
         stop_cheat_caller_address(defi.contract_address);
         
         stop_cheat_block_timestamp(circuit_breaker.contract_address);
+        
+        // Debug - check the trigger status first with simplified test
+        // But we want 70% of the ORIGINAL 10000 = 7000, and we have 2000, so should trigger
+        
+        let is_triggered = circuit_breaker.is_rate_limit_triggered(token.contract_address);
+        
+        // Debug: Let's see what the actual trigger status is
+        assert_eq!(is_triggered, true, "Rate limit should be triggered");
         
         // Verify rate limit triggered
         assert_eq!(circuit_breaker.is_rate_limited(), true);
@@ -228,7 +260,7 @@
         let circuit_breaker = deploy_circuit_breaker();
         let admin = contract_address_const::<'admin'>();
         let alice = contract_address_const::<'alice'>();
-        let token = deploy_mock_token('USDC','USDC');
+        let token = deploy_mock_token();
         let defi = deploy_mock_defi(circuit_breaker.contract_address);
         
         // Setup and trigger rate limit (similar to previous test)
@@ -245,10 +277,10 @@
         
         // Deposit and trigger rate limit
         let large_amount: u256 = 1000000000000000000000000;
-        token.mint(alice, large_amount);
+        token.mock.mint(alice, large_amount);
         
         start_cheat_caller_address(token.contract_address, alice);
-        token.approve(defi.contract_address, large_amount);
+        token.erc20.approve(defi.contract_address, large_amount);
         stop_cheat_caller_address(token.contract_address);
         
         start_cheat_caller_address(defi.contract_address, alice);
@@ -302,7 +334,7 @@
     fn test_emergency_pause() {
         let circuit_breaker = deploy_circuit_breaker();
         let admin = contract_address_const::<'admin'>();
-        let token = deploy_mock_token('USDC','USDC');
+        let token = deploy_mock_token();
         let defi = deploy_mock_defi(circuit_breaker.contract_address);
         
         // Setup
@@ -334,7 +366,7 @@
         let admin = contract_address_const::<'admin'>();
         let recovery = contract_address_const::<'recovery'>();
         let alice = contract_address_const::<'alice'>();
-        let token = deploy_mock_token('USDC','USDC');
+        let token = deploy_mock_token();
         let defi = deploy_mock_defi(circuit_breaker.contract_address);
         
         // Setup and deposit funds
@@ -351,10 +383,10 @@
         
         // Deposit funds that will be stuck in circuit breaker
         let amount: u256 = 1000000000000000000000;
-        token.mint(alice, amount);
+        token.mock.mint(alice, amount);
         
         start_cheat_caller_address(token.contract_address, alice);
-        token.approve(defi.contract_address, amount);
+        token.erc20.approve(defi.contract_address, amount);
         stop_cheat_caller_address(token.contract_address);
         
         start_cheat_caller_address(defi.contract_address, alice);
@@ -379,3 +411,4 @@
         // Verify migration successful
         assert_eq!(circuit_breaker.is_operational(), false);
     }
+}

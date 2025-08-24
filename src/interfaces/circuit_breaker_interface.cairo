@@ -1,11 +1,8 @@
-// src/interfaces/circuit_breaker_interface.cairo
-
 use starknet::ContractAddress;
 use crate::types::structs::SignedU256;
 
 #[starknet::interface]
 pub trait ICircuitBreaker<TContractState> {
-    // Asset management - Fixed parameter names to match Solidity
     fn register_asset(
         ref self: TContractState,
         asset: ContractAddress,

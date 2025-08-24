@@ -1,5 +1,3 @@
-// src/utils/limiter_lib.cairo
-
 use starknet::get_block_timestamp;
 use crate::types::structs::{Limiter, LiqChangeNode, SignedU256, SignedU256Trait, LimitStatus};
 
@@ -10,8 +8,6 @@ pub mod Errors {
     pub const LIMITER_ALREADY_INITIALIZED: felt252 = 'Limiter already initialized';
     pub const LIMITER_NOT_INITIALIZED: felt252 = 'Limiter not initialized';
 }
-
-// Define trait explicitly instead of using generate_trait
 pub trait MapTrait<T> {
     fn read(ref self: T, key: u64) -> LiqChangeNode;
     fn write(ref self: T, key: u64, value: LiqChangeNode);
@@ -62,6 +58,7 @@ pub impl LimiterLibImpl of LimiterLibTrait {
 
         let list_head = limiter.list_head;
         if list_head == 0 {
+            // If there is no head, set the head to the new change
             limiter.list_head = current_tick_timestamp;
             limiter.list_tail = current_tick_timestamp;
             nodes_map.write(current_tick_timestamp, LiqChangeNode {
@@ -69,16 +66,20 @@ pub impl LimiterLibImpl of LimiterLibTrait {
                 next_timestamp: 0,
             });
         } else {
+            // If there is a head, check if we need to sync old changes
             if get_block_timestamp() - list_head >= withdrawal_period {
                 Self::sync(ref limiter, withdrawal_period, 0xffffffffffffffffffffffffffffffff, ref nodes_map);
             }
 
+            // Check if tail is the same as current tick timestamp (multiple txs in same tick)
             let list_tail = limiter.list_tail;
             if list_tail == current_tick_timestamp {
+                // Add amount to existing node
                 let mut current_node = nodes_map.read(current_tick_timestamp);
                 current_node.amount = current_node.amount.add(amount);
                 nodes_map.write(current_tick_timestamp, current_node);
             } else {
+                // Add new node to tail
                 let mut tail_node = nodes_map.read(list_tail);
                 tail_node.next_timestamp = current_tick_timestamp;
                 nodes_map.write(list_tail, tail_node);
@@ -110,6 +111,7 @@ pub impl LimiterLibImpl of LimiterLibTrait {
             total_change = total_change.add(node.amount);
             let next_timestamp = node.next_timestamp;
             
+            // Clear data
             nodes_map.write(current_head, LiqChangeNode {
                 amount: SignedU256Trait::zero(),
                 next_timestamp: 0,
@@ -120,6 +122,8 @@ pub impl LimiterLibImpl of LimiterLibTrait {
         }
 
         if current_head == 0 {
+            // If the list is empty, set tail and head to current timestamp
+            // Note: Solidity uses block.timestamp here, but we use 0 to indicate empty list
             limiter.list_head = 0;
             limiter.list_tail = 0;
         } else {
@@ -137,17 +141,31 @@ pub impl LimiterLibImpl of LimiterLibTrait {
 
         let current_liq = *limiter.liq_total;
 
+        // Only enforce rate limit if there is significant liquidity
+        // Check if current liquidity is negative or below threshold
         if current_liq.is_negative {
             return LimitStatus::Inactive;
         }
+        
+        // Compare threshold against the unsigned value of current liquidity
         if *limiter.limit_begin_threshold > current_liq.value {
             return LimitStatus::Inactive;
         }
-
-        let future_liq = current_liq.add(*limiter.liq_in_period);
-        let min_liq = current_liq.mul_bps(*limiter.min_liq_retained_bps);
+        // If we assume the baseline is the peak liquidity during the period:
+        // - If liq_in_period is positive, the baseline is current_liq + liq_in_period  
+        // - If liq_in_period is negative, the baseline is current_liq - liq_in_period
+        let baseline_liq = if (*limiter.liq_in_period).is_negative {
+            // If net negative, the peak was higher than current
+            current_liq.sub(*limiter.liq_in_period)
+        } else {
+            // If net positive, the peak is current + positive flows
+            current_liq.add(*limiter.liq_in_period)
+        };
         
-        if future_liq.is_less_than(min_liq) {
+        let min_liq = baseline_liq.mul_bps(*limiter.min_liq_retained_bps);
+        
+        // Check if current liquidity is below the minimum required
+        if current_liq.is_less_than(min_liq) {
             LimitStatus::Triggered
         } else {
             LimitStatus::Ok
@@ -159,6 +177,6 @@ pub impl LimiterLibImpl of LimiterLibTrait {
     }
 }
 
-fn get_tick_timestamp(timestamp: u64, tick_length: u64) -> u64 {
+pub fn get_tick_timestamp(timestamp: u64, tick_length: u64) -> u64 {
     timestamp - (timestamp % tick_length)
 }

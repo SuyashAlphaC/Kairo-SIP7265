@@ -1,5 +1,3 @@
-// src/types/structs.cairo
-
 use core::panic_with_felt252;
 use starknet::ContractAddress;
 

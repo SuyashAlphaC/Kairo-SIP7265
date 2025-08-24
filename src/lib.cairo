@@ -1,5 +1,3 @@
-// src/lib.cairo
-
 // Core modules
 pub mod core {
     pub mod circuit_breaker;
@@ -30,7 +28,7 @@ pub mod mocks {
     pub mod mock_defi_protocol;
 }
 
-// Re-exports for easy access
+
 pub use core::circuit_breaker::CircuitBreaker;
 pub use interfaces::circuit_breaker_interface::{
     ICircuitBreaker, ICircuitBreakerDispatcher, ICircuitBreakerDispatcherTrait

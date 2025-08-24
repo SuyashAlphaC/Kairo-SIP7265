@@ -1,10 +1,7 @@
-// src/core/circuit_breaker.cairo
-
-use starknet::{ContractAddress, get_caller_address, get_contract_address, get_block_timestamp};
+use starknet::{ContractAddress};
 use openzeppelin_access::ownable::OwnableComponent;
 use openzeppelin_security::pausable::PausableComponent;
 use openzeppelin_token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
-use starknet::storage::{StoragePointerWriteAccess, StoragePointerReadAccess, Map, StorageMapReadAccess, StorageMapWriteAccess};
 
 #[derive(Drop, starknet::Event)]
     pub struct AssetRegistered {
@@ -73,51 +70,56 @@ pub mod CircuitBreaker {
         get_contract_address, contract_address_const
     };
     use starknet::storage::{
-        Map, StoragePointerReadAccess, StoragePointerWriteAccess, 
+        Map, StoragePointerReadAccess, StoragePointerWriteAccess,
         StorageMapReadAccess, StorageMapWriteAccess
     };
     use super::{OwnableComponent, PausableComponent,
         IERC20Dispatcher, IERC20DispatcherTrait, AssetInflow, AssetRegistered, AssetRateLimitBreached, AssetWithdraw, LockedFundsClaimed, TokenBacklogCleaned, GracePeriodStarted, AdminSet};
     use crate::interfaces::circuit_breaker_interface::ICircuitBreaker;
     use crate::types::structs::{Limiter, LiqChangeNode, SignedU256, LimitStatus, SignedU256Trait};
-    use crate::utils::limiter_lib::{LimiterLibTrait, LimiterLibImpl};
+    use crate::utils::limiter_lib::{LimiterLibTrait, LimiterLibImpl, MapTrait, get_tick_timestamp};
     use openzeppelin_access::ownable::OwnableComponent::InternalTrait as OwnableInternalTrait;
     use openzeppelin_security::PausableComponent::InternalTrait as PausableInternalTrait;
 
-   // #[abi(embed_v0)]
-    //impl ERC20MixinImpl = ERC20Component::ERC20MixinImpl<ContractState>;
-    //impl ERC20InternalImpl = ERC20Component::InternalImpl<ContractState>;
-
-    // Components
-    //component!(path: ERC20Component, storage: erc20, event: ERC20Event);
     component!(path: OwnableComponent, storage: ownable, event: OwnableEvent);
     component!(path: PausableComponent, storage: pausable, event: PausableEvent);
-    
-    // Ownable Mixin
+
     #[abi(embed_v0)]
     impl OwnableMixinImpl = OwnableComponent::OwnableMixinImpl<ContractState>;
     impl OwnableInternalImpl = OwnableComponent::InternalImpl<ContractState>;
 
-    // Pausable
     #[abi(embed_v0)]
     impl PausableImpl = PausableComponent::PausableImpl<ContractState>;
     impl PausableInternalImpl = PausableComponent::InternalImpl<ContractState>;
 
+    #[derive(Drop)]
+    struct NodeMapWrapper {
+        state: @ContractState,
+        token: ContractAddress,
+    }
+
+    impl NodeMapWrapperImpl of MapTrait<NodeMapWrapper> {
+        fn read(ref self: NodeMapWrapper, key: u64) -> LiqChangeNode {
+            self.state.list_nodes.read((self.token, key))
+        }
+
+        fn write(ref self: NodeMapWrapper, key: u64, value: LiqChangeNode) {
+            //Returning just to satisfy the trait
+        }
+    }
 
     #[storage]
     struct Storage {
-        //#[substorage(v0)]
-       // erc20: ERC20Component::Storage,
         #[substorage(v0)]
         pausable: PausableComponent::Storage,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
-        
+
         token_limiters: Map<ContractAddress, Limiter>,
         locked_funds: Map<(ContractAddress, ContractAddress), u256>, // (recipient, asset) -> amount
         list_nodes: Map<(ContractAddress, u64), LiqChangeNode>, // (token, timestamp) -> node
         is_protected_contract: Map<ContractAddress, bool>,
-        
+
         admin: ContractAddress,
         is_rate_limited: bool,
         rate_limit_cooldown_period: u64,
@@ -125,14 +127,13 @@ pub mod CircuitBreaker {
         grace_period_end_timestamp: u64,
         withdrawal_period: u64,
         tick_length: u64,
+
         native_address_proxy: ContractAddress,
     }
 
     #[event]
     #[derive(Drop, starknet::Event)]
     pub enum Event {
-        //#[flat]
-        //ERC20Event: ERC20Component::Event,
         #[flat]
         PausableEvent: PausableComponent::Event,
         #[flat]
@@ -147,7 +148,7 @@ pub mod CircuitBreaker {
         TokenBacklogCleaned: TokenBacklogCleaned,
     }
 
-    
+
     pub mod Errors {
         pub const NOT_A_PROTECTED_CONTRACT: felt252 = 'Not a protected contract';
         pub const NOT_ADMIN: felt252 = 'Not admin';
@@ -178,8 +179,7 @@ pub mod CircuitBreaker {
         self.withdrawal_period.write(withdrawal_period);
         self.tick_length.write(tick_length);
         self.is_rate_limited.write(false);
-        
-        // Use address(1) as proxy for native token
+
         self.native_address_proxy.write(contract_address_const::<1>());
     }
 
@@ -192,11 +192,9 @@ pub mod CircuitBreaker {
             min_amount_to_limit: u256
         ) {
             self._assert_only_admin();
-            
             let mut limiter = self.token_limiters.read(asset);
             LimiterLibImpl::init(ref limiter, metric_threshold, min_amount_to_limit);
             self.token_limiters.write(asset, limiter);
-            
             self.emit(Event::AssetRegistered(AssetRegistered {
                 asset,
                 metric_threshold,
@@ -211,14 +209,11 @@ pub mod CircuitBreaker {
             min_amount_to_limit: u256
         ) {
             self._assert_only_admin();
-            
             let mut limiter = self.token_limiters.read(asset);
             LimiterLibImpl::update_params(ref limiter, metric_threshold, min_amount_to_limit);
             
             // Sync the limiter
-            self._sync_limiter(asset, 0xffffffffffffffffffffffffffffffff);
-            
-            self.token_limiters.write(asset, limiter);
+            self._sync_limiter_with_lib(asset, 0xffffffffffffffffffffffffffffffff);
         }
 
         fn on_token_inflow(ref self: ContractState, token: ContractAddress, amount: u256) {
@@ -253,33 +248,28 @@ pub mod CircuitBreaker {
         ) -> bool {
             self._assert_only_protected();
             self.pausable.assert_not_paused();
-            
+
             let native_proxy = self.native_address_proxy.read();
-            // In Starknet, we need to handle native token differently
-            // This is a placeholder - actual implementation would depend on Starknet's native token handling
-            let amount: u256 = 0; // Should get msg.value equivalent
-            
+            let amount: u256 = 0; 
+
             self._on_token_outflow(native_proxy, amount, recipient, revert_on_rate_limit);
             true
         }
 
         fn claim_locked_funds(ref self: ContractState, asset: ContractAddress, recipient: ContractAddress) {
             self.pausable.assert_not_paused();
-            
             let amount = self.locked_funds.read((recipient, asset));
             assert(amount > 0, Errors::NO_LOCKED_FUNDS);
             assert(!self.is_rate_limited.read(), Errors::RATE_LIMITED);
-            
+
             self.locked_funds.write((recipient, asset), 0);
-            
+
             self.emit(Event::LockedFundsClaimed(LockedFundsClaimed { asset, recipient }));
-            
             self._safe_transfer_including_native(asset, recipient, amount);
         }
 
         fn clear_backlog(ref self: ContractState, token: ContractAddress, max_iterations: u256) {
-            self._sync_limiter(token, max_iterations);
-            
+            self._sync_limiter_with_lib(token, max_iterations);
             self.emit(Event::TokenBacklogCleaned(TokenBacklogCleaned {
                 token,
                 timestamp: get_block_timestamp(),
@@ -288,22 +278,20 @@ pub mod CircuitBreaker {
 
         fn override_expired_rate_limit(ref self: ContractState) {
             assert(self.is_rate_limited.read(), Errors::NOT_RATE_LIMITED);
-            
             let cooldown_period = self.rate_limit_cooldown_period.read();
             let last_limit_time = self.last_rate_limit_timestamp.read();
-            
+
             assert(
                 get_block_timestamp() - last_limit_time >= cooldown_period,
                 Errors::COOLDOWN_PERIOD_NOT_REACHED
             );
-            
             self.is_rate_limited.write(false);
         }
 
         fn set_admin(ref self: ContractState, new_admin: ContractAddress) {
             self._assert_only_admin();
             assert(!new_admin.is_zero(), Errors::INVALID_ADMIN_ADDRESS);
-            
+
             self.admin.write(new_admin);
             self.ownable._transfer_ownership(new_admin);
             self.emit(Event::AdminSet(AdminSet { new_admin }));
@@ -312,8 +300,9 @@ pub mod CircuitBreaker {
         fn override_rate_limit(ref self: ContractState) {
             self._assert_only_admin();
             assert(self.is_rate_limited.read(), Errors::NOT_RATE_LIMITED);
-            
+
             self.is_rate_limited.write(false);
+            // Allow the grace period to extend for the full withdrawal period
             let withdrawal_period = self.withdrawal_period.read();
             let last_limit_time = self.last_rate_limit_timestamp.read();
             self.grace_period_end_timestamp.write(last_limit_time + withdrawal_period);
@@ -321,7 +310,6 @@ pub mod CircuitBreaker {
 
         fn add_protected_contracts(ref self: ContractState, protected_contracts: Array<ContractAddress>) {
             self._assert_only_admin();
-            
             let mut i = 0;
             while i < protected_contracts.len() {
                 self.is_protected_contract.write(*protected_contracts.at(i), true);
@@ -331,7 +319,6 @@ pub mod CircuitBreaker {
 
         fn remove_protected_contracts(ref self: ContractState, protected_contracts: Array<ContractAddress>) {
             self._assert_only_admin();
-            
             let mut i = 0;
             while i < protected_contracts.len() {
                 self.is_protected_contract.write(*protected_contracts.at(i), false);
@@ -342,7 +329,7 @@ pub mod CircuitBreaker {
         fn start_grace_period(ref self: ContractState, grace_period_end_timestamp: u64) {
             self._assert_only_admin();
             assert(grace_period_end_timestamp > get_block_timestamp(), Errors::INVALID_GRACE_PERIOD_END);
-            
+
             self.grace_period_end_timestamp.write(grace_period_end_timestamp);
             self.emit(Event::GracePeriodStarted(GracePeriodStarted { grace_period_end: grace_period_end_timestamp }));
         }
@@ -359,20 +346,20 @@ pub mod CircuitBreaker {
         ) {
             self._assert_only_admin();
             assert(self.pausable.is_paused(), Errors::NOT_EXPLOITED);
-            
+
             let mut i = 0;
             while i < assets.len() {
                 let asset = *assets.at(i);
                 let native_proxy = self.native_address_proxy.read();
-                
+
                 let amount = if asset == native_proxy {
-                    // For native asset, would need balance check
-                    0 // Placeholder - would get contract balance
+                    // For native assets, would need balance of contract
+                    0
                 } else {
                     let token = IERC20Dispatcher { contract_address: asset };
                     token.balance_of(get_contract_address())
                 };
-                
+
                 if amount > 0 {
                     self._safe_transfer_including_native(asset, recovery_recipient, amount);
                 }
@@ -444,6 +431,19 @@ pub mod CircuitBreaker {
         }
     }
 
+    // Storage wrapper for MapTrait implementation
+    #[derive(Drop)]
+    struct StorageMapWrapper {
+        token: ContractAddress,
+        state: @ContractState,
+    }
+
+    #[derive(Drop)]
+    struct MutableStorageMapWrapper {
+        token: ContractAddress,
+        state: @ContractState,
+    }
+
     #[generate_trait]
     impl InternalFunctions of InternalFunctionsTrait {
         fn _assert_only_protected(self: @ContractState) {
@@ -456,27 +456,29 @@ pub mod CircuitBreaker {
             assert(caller == self.admin.read(), Errors::NOT_ADMIN);
         }
 
-        fn _sync_limiter(ref self: ContractState, token: ContractAddress, max_iterations: u256) {
+        // Sync limiter using LimiterLib directly (similar to Solidity)
+        fn _sync_limiter_with_lib(ref self: ContractState, token: ContractAddress, max_iterations: u256) {
             let mut limiter = self.token_limiters.read(token);
             let withdrawal_period = self.withdrawal_period.read();
             
+            // We need to manually handle the sync since we can't pass mutable storage map
             let mut current_head = limiter.list_head;
             let mut total_change = SignedU256Trait::zero();
             let mut iter: u256 = 0;
 
-            while current_head != 0 
-                && get_block_timestamp() - current_head >= withdrawal_period 
+            while current_head != 0
+                && get_block_timestamp() - current_head >= withdrawal_period
                 && iter < max_iterations {
-                
+
                 let node = self.list_nodes.read((token, current_head));
                 total_change = total_change.add(node.amount);
                 let next_timestamp = node.next_timestamp;
-                
+
+                // Clear data
                 self.list_nodes.write((token, current_head), LiqChangeNode {
                     amount: SignedU256Trait::zero(),
                     next_timestamp: 0,
                 });
-
                 current_head = next_timestamp;
                 iter += 1;
             }
@@ -488,27 +490,39 @@ pub mod CircuitBreaker {
                 limiter.list_head = current_head;
             }
 
+            // Remove old changes from both totals when they're outside the period  
             limiter.liq_total = limiter.liq_total.add(total_change);
             limiter.liq_in_period = limiter.liq_in_period.sub(total_change);
-            
+
             self.token_limiters.write(token, limiter);
         }
 
-        fn _record_change(ref self: ContractState, token: ContractAddress, amount: SignedU256) {
+        fn _record_change_with_lib(ref self: ContractState, token: ContractAddress, amount: SignedU256) {
             let mut limiter = self.token_limiters.read(token);
-            
             if !limiter.initialized {
                 return;
             }
 
             let withdrawal_period = self.withdrawal_period.read();
             let tick_length = self.tick_length.read();
-            let current_tick_timestamp = self._get_tick_timestamp(get_block_timestamp(), tick_length);
-            
-            limiter.liq_in_period = limiter.liq_in_period.add(amount);
+            let current_tick_timestamp = get_tick_timestamp(get_block_timestamp(), tick_length);
 
+            // Sync if needed
             let list_head = limiter.list_head;
-            if list_head == 0 {
+            if list_head != 0 && get_block_timestamp() - list_head >= withdrawal_period {
+                self._sync_limiter_with_lib(token, 0xffffffffffffffffffffffffffffffff);
+                limiter = self.token_limiters.read(token); // Re-read after sync
+            }
+
+            // Update liq_in_period for withdrawal period tracking
+            limiter.liq_in_period = limiter.liq_in_period.add(amount);
+            
+            // For liq_total, we track actual current liquidity
+            // Deposits increase it, withdrawals decrease it
+            limiter.liq_total = limiter.liq_total.add(amount);
+
+            // Update linked list
+            if limiter.list_head == 0 {
                 limiter.list_head = current_tick_timestamp;
                 limiter.list_tail = current_tick_timestamp;
                 self.list_nodes.write((token, current_tick_timestamp), LiqChangeNode {
@@ -516,12 +530,6 @@ pub mod CircuitBreaker {
                     next_timestamp: 0,
                 });
             } else {
-                if get_block_timestamp() - list_head >= withdrawal_period {
-                    self._sync_limiter(token, 0xffffffffffffffffffffffffffffffff);
-                    // Re-read the limiter after sync
-                    limiter = self.token_limiters.read(token);
-                }
-
                 let list_tail = limiter.list_tail;
                 if list_tail == current_tick_timestamp {
                     let mut current_node = self.list_nodes.read((token, current_tick_timestamp));
@@ -531,7 +539,7 @@ pub mod CircuitBreaker {
                     let mut tail_node = self.list_nodes.read((token, list_tail));
                     tail_node.next_timestamp = current_tick_timestamp;
                     self.list_nodes.write((token, list_tail), tail_node);
-                    
+
                     self.list_nodes.write((token, current_tick_timestamp), LiqChangeNode {
                         amount: amount,
                         next_timestamp: 0,
@@ -539,17 +547,15 @@ pub mod CircuitBreaker {
                     limiter.list_tail = current_tick_timestamp;
                 }
             }
-            
+
             self.token_limiters.write(token, limiter);
         }
 
-        fn _get_tick_timestamp(self: @ContractState, timestamp: u64, tick_length: u64) -> u64 {
-            timestamp - (timestamp % tick_length)
-        }
-
         fn _on_token_inflow(ref self: ContractState, token: ContractAddress, amount: u256) {
+            // Convert to signed positive amount (similar to Solidity int256(_amount))
             let signed_amount = SignedU256Trait::from_u256(amount);
-            self._record_change(token, signed_amount);
+            self._record_change_with_lib(token, signed_amount);
+            
             self.emit(Event::AssetInflow(AssetInflow { token, amount }));
         }
 
@@ -560,16 +566,18 @@ pub mod CircuitBreaker {
             recipient: ContractAddress,
             revert_on_rate_limit: bool
         ) {
-            let limiter = self.token_limiters.read(token);
+            let mut limiter = self.token_limiters.read(token);
             
-            // If token is not registered, just transfer
+            // Check if the token has enforced rate limit
             if !LimiterLibImpl::initialized(@limiter) {
+                // If not rate limited, just transfer the tokens
                 self._safe_transfer_including_native(token, recipient, amount);
                 return;
             }
 
-            let signed_amount = SignedU256Trait::new(amount, true); // negative for outflow
-            self._record_change(token, signed_amount);
+            // Record the withdrawal (negative amount, similar to Solidity -int256(_amount))
+            let signed_amount = SignedU256Trait::new(amount, true); // true for negative
+            self._record_change_with_lib(token, signed_amount);
 
             // Check if currently rate limited
             if self.is_rate_limited.read() {
@@ -581,34 +589,32 @@ pub mod CircuitBreaker {
                 return;
             }
 
-            // Re-read limiter after record_change
-            let limiter = self.token_limiters.read(token);
+            // Re-read limiter after recording change
+            limiter = self.token_limiters.read(token);
             
-            // Check if rate limit is triggered and not in grace period
+            // Check if rate limit is triggered after withdrawal and not in grace period
             if LimiterLibImpl::status(@limiter) == LimitStatus::Triggered && !self._is_in_grace_period() {
                 if revert_on_rate_limit {
                     panic_with_felt252(Errors::RATE_LIMITED);
                 }
-
-                // Set rate limited state
+                
+                // Set rate limited to true
                 self.is_rate_limited.write(true);
                 self.last_rate_limit_timestamp.write(get_block_timestamp());
                 
-                // Lock the funds
+                // Add to locked funds claimable when resolved
                 let current_locked = self.locked_funds.read((recipient, token));
                 self.locked_funds.write((recipient, token), current_locked + amount);
-                
+
                 self.emit(Event::AssetRateLimitBreached(AssetRateLimitBreached {
                     asset: token,
                     timestamp: get_block_timestamp(),
                 }));
-                
                 return;
             }
 
-            // Normal transfer
+            // If everything is good, transfer the tokens
             self._safe_transfer_including_native(token, recipient, amount);
-            
             self.emit(Event::AssetWithdraw(AssetWithdraw { asset: token, recipient, amount }));
         }
 
@@ -624,8 +630,6 @@ pub mod CircuitBreaker {
 
             let native_proxy = self.native_address_proxy.read();
             if token == native_proxy {
-                // Native transfer - in Cairo/Starknet, this would be handled differently
-                // For now, we'll use a placeholder implementation
                 self._transfer_native(recipient, amount);
             } else {
                 let erc20 = IERC20Dispatcher { contract_address: token };
@@ -635,10 +639,17 @@ pub mod CircuitBreaker {
         }
 
         fn _transfer_native(ref self: ContractState, recipient: ContractAddress, amount: u256) {
-            // Placeholder for native token transfer
-            // In Starknet, native token transfers are handled differently
-            // This would typically involve calling the ETH contract directly
-            // For production, implement proper ETH transfer logic here
+            assert(!recipient.is_zero(), Errors::INVALID_RECIPIENT_ADDRESS);
+            
+            if amount == 0 {
+                return;
+            }
+            let eth_contract = IERC20Dispatcher { 
+                contract_address: contract_address_const::<0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7>() // ETH token address on Starknet mainnet
+            };
+            
+            let success = eth_contract.transfer(recipient, amount);
+            assert(success, Errors::NATIVE_TRANSFER_FAILED);
         }
 
         fn _is_in_grace_period(self: @ContractState) -> bool {

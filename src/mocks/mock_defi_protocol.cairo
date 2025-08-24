@@ -1,5 +1,3 @@
-// src/mocks/mock_defi_protocol.cairo
-
 #[starknet::interface]
 pub trait IMockDeFiProtocol<TContractState> {
     fn deposit(ref self: TContractState, token: starknet::ContractAddress, amount: u256);
