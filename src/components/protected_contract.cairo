@@ -29,7 +29,6 @@ pub mod ProtectedContractComponent {
         pub const TRANSFER_FAILED: felt252 = 'Transfer failed';
     }
 
-    // Generate the trait automatically
     #[generate_trait]
     pub impl ProtectedContractImpl<
         TContractState, +HasComponent<TContractState>

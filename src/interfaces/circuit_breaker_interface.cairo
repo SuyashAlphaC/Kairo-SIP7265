@@ -76,9 +76,21 @@ pub trait ICircuitBreaker<TContractState> {
     fn tick_length(self: @TContractState) -> u64;
     fn native_address_proxy(self: @TContractState) -> ContractAddress;
 
-    // Simple guardian functions
+    // Guardian management functions
     fn add_guardian(ref self: TContractState, guardian: ContractAddress);
     fn remove_guardian(ref self: TContractState, guardian: ContractAddress);
     fn is_guardian(self: @TContractState, address: ContractAddress) -> bool;
     fn guardian_count(self: @TContractState) -> u32;
+    
+    // Advanced guardian functions
+    fn guardian_emergency_pause(ref self: TContractState);
+    fn guardian_propose_rate_limit_override(ref self: TContractState, proposal_id: u256);
+    fn guardian_vote_rate_limit_override(ref self: TContractState, proposal_id: u256, approve: bool);
+    fn execute_guardian_rate_limit_override(ref self: TContractState, proposal_id: u256);
+    fn set_guardian_threshold(ref self: TContractState, new_threshold: u32);
+    
+    // Guardian monitoring functions
+    fn get_guardian_override_proposal(self: @TContractState, proposal_id: u256) -> (ContractAddress, u32, u32, u64, bool);
+    fn guardian_threshold(self: @TContractState) -> u32;
+    fn has_guardian_voted(self: @TContractState, proposal_id: u256, guardian: ContractAddress) -> bool;
 }

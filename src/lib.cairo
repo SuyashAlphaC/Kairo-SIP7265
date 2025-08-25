@@ -34,7 +34,7 @@ pub use interfaces::circuit_breaker_interface::{
     ICircuitBreaker, ICircuitBreakerDispatcher, ICircuitBreakerDispatcherTrait
 };
 pub use components::protected_contract::ProtectedContractComponent;
-pub use types::structs::{Limiter, LiqChangeNode, SignedU256, LimitStatus, SignedU256Trait};
+pub use types::structs::{Limiter, LiqChangeNode, SignedU256, LimitStatus, SignedU256Trait, GuardianOverrideProposal};
 pub use utils::limiter_lib::{LimiterLibTrait, LimiterLibImpl};
 pub use mocks::mock_token::{MockToken};
 pub use mocks::mock_defi_protocol::{

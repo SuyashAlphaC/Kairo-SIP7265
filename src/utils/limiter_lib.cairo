@@ -182,8 +182,9 @@ pub impl LimiterLibImpl of LimiterLibTrait {
                 // All liquidity was withdrawn - need to make a reasonable assumption about peak
                 // Since we have no info, use a conservative estimate that's reasonable for circuit breaking
                 // The challenge: we need to balance being too conservative vs too lenient
-                // Use a very aggressive peak estimate to test if this is the bottleneck
-                let peak_estimate = SignedU256Trait::from_u256(10000000000000000000000); // 10,000 tokens
+                // Conservative estimate: use a multiple of the threshold
+                // This ensures reasonable behavior for zero-liquidity cases
+                let peak_estimate = SignedU256Trait::from_u256(*limiter.limit_begin_threshold * 3);
                 peak_estimate
             } else {
                 // Some liquidity remains - current is likely close to peak

@@ -32,6 +32,15 @@ pub enum LimitStatus {
     Triggered,
 }
 
+#[derive(Drop, Serde, starknet::Store)]
+pub struct GuardianOverrideProposal {
+    pub proposer: ContractAddress,
+    pub votes_for: u32,
+    pub votes_against: u32,
+    pub creation_timestamp: u64,
+    pub executed: bool,
+}
+
 #[generate_trait]
 pub impl SignedU256Impl of SignedU256Trait {
     fn new(value: u256, is_negative: bool) -> SignedU256 {

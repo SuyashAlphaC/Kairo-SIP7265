@@ -60,6 +60,44 @@ use openzeppelin_token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTra
         pub timestamp: u64,
     }
 
+    #[derive(Drop, starknet::Event)]
+    pub struct GuardianEmergencyPause {
+        #[key]
+        pub guardian: ContractAddress,
+        pub timestamp: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct GuardianOverrideProposed {
+        #[key]
+        pub proposal_id: u256,
+        #[key]
+        pub proposer: ContractAddress,
+        pub timestamp: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct GuardianOverrideVote {
+        #[key]
+        pub proposal_id: u256,
+        #[key]
+        pub guardian: ContractAddress,
+        pub approve: bool,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct GuardianOverrideExecuted {
+        #[key]
+        pub proposal_id: u256,
+        pub timestamp: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct GuardianThresholdChanged {
+        pub old_threshold: u32,
+        pub new_threshold: u32,
+    }
+
 
 #[starknet::contract]
 pub mod CircuitBreaker {
@@ -74,9 +112,9 @@ pub mod CircuitBreaker {
         StorageMapReadAccess, StorageMapWriteAccess
     };
     use super::{OwnableComponent, PausableComponent,
-        IERC20Dispatcher, IERC20DispatcherTrait, AssetInflow, AssetRegistered, AssetRateLimitBreached, AssetWithdraw, LockedFundsClaimed, TokenBacklogCleaned, GracePeriodStarted, AdminSet};
+        IERC20Dispatcher, IERC20DispatcherTrait, AssetInflow, AssetRegistered, AssetRateLimitBreached, AssetWithdraw, LockedFundsClaimed, TokenBacklogCleaned, GracePeriodStarted, AdminSet, GuardianEmergencyPause, GuardianOverrideProposed, GuardianOverrideVote, GuardianOverrideExecuted, GuardianThresholdChanged};
     use crate::interfaces::circuit_breaker_interface::ICircuitBreaker;
-    use crate::types::structs::{Limiter, LiqChangeNode, SignedU256, LimitStatus, SignedU256Trait};
+    use crate::types::structs::{Limiter, LiqChangeNode, SignedU256, LimitStatus, SignedU256Trait, GuardianOverrideProposal};
     use crate::utils::limiter_lib::{LimiterLibTrait, LimiterLibImpl, MapTrait, get_tick_timestamp};
     use openzeppelin_access::ownable::OwnableComponent::InternalTrait as OwnableInternalTrait;
     use openzeppelin_security::PausableComponent::InternalTrait as PausableInternalTrait;
@@ -117,6 +155,9 @@ pub mod CircuitBreaker {
         ownable: OwnableComponent::Storage,
         guardians: Map<ContractAddress, bool>,
         guardian_count: u32,
+        guardian_threshold: u32,
+        guardian_override_proposals: Map<u256, GuardianOverrideProposal>,
+        guardian_votes: Map<(u256, ContractAddress), bool>, // (proposal_id, guardian) -> has_voted
 
         token_limiters: Map<ContractAddress, Limiter>,
         locked_funds: Map<(ContractAddress, ContractAddress), u256>, // (recipient, asset) -> amount
@@ -149,6 +190,11 @@ pub mod CircuitBreaker {
         AdminSet: AdminSet,
         GracePeriodStarted: GracePeriodStarted,
         TokenBacklogCleaned: TokenBacklogCleaned,
+        GuardianEmergencyPause: GuardianEmergencyPause,
+        GuardianOverrideProposed: GuardianOverrideProposed,
+        GuardianOverrideVote: GuardianOverrideVote,
+        GuardianOverrideExecuted: GuardianOverrideExecuted,
+        GuardianThresholdChanged: GuardianThresholdChanged,
     }
 
 
@@ -166,6 +212,12 @@ pub mod CircuitBreaker {
         pub const NATIVE_TRANSFER_FAILED: felt252 = 'Native transfer failed';
         pub const INVALID_RECIPIENT_ADDRESS: felt252 = 'Invalid recipient address';
         pub const INSUFFICIENT_BALANCE: felt252 = 'Insufficient balance';
+        pub const NOT_GUARDIAN: felt252 = 'Not guardian';
+        pub const PROPOSAL_NOT_FOUND: felt252 = 'Proposal not found';
+        pub const PROPOSAL_ALREADY_EXECUTED: felt252 = 'Proposal already executed';
+        pub const ALREADY_VOTED: felt252 = 'Already voted';
+        pub const INSUFFICIENT_VOTES: felt252 = 'Insufficient votes';
+        pub const INVALID_THRESHOLD: felt252 = 'Invalid threshold';
     }
 
     #[constructor]
@@ -179,6 +231,7 @@ pub mod CircuitBreaker {
         self.admin.write(admin);
         self.ownable.initializer(admin);
         self.guardian_count.write(0);
+        self.guardian_threshold.write(1); // Default to requiring 1 guardian for multi-sig operations
         self.rate_limit_cooldown_period.write(rate_limit_cooldown_period);
         self.withdrawal_period.write(withdrawal_period);
         self.tick_length.write(tick_length);
@@ -460,6 +513,136 @@ pub mod CircuitBreaker {
 
         fn guardian_count(self: @ContractState) -> u32 {
             self.guardian_count.read()
+        }
+
+        // ==================== ADVANCED GUARDIAN FUNCTIONS ====================
+
+        fn guardian_emergency_pause(ref self: ContractState) {
+            let caller = get_caller_address();
+            assert(self.guardians.read(caller), Errors::NOT_GUARDIAN);
+            
+            // Only allow if system is operational
+            assert(!self.pausable.is_paused(), 'Already paused');
+            
+            // Emergency pause by guardian
+            self.pausable.pause();
+            
+            self.emit(Event::GuardianEmergencyPause(GuardianEmergencyPause {
+                guardian: caller,
+                timestamp: get_block_timestamp(),
+            }));
+        }
+
+        fn guardian_propose_rate_limit_override(ref self: ContractState, proposal_id: u256) {
+            let caller = get_caller_address();
+            assert(self.guardians.read(caller), Errors::NOT_GUARDIAN);
+            assert(self.is_rate_limited.read(), Errors::NOT_RATE_LIMITED);
+            
+            // Check proposal doesn't already exist
+            let existing_proposal = self.guardian_override_proposals.read(proposal_id);
+            assert(existing_proposal.proposer.is_zero(), 'Proposal already exists');
+            
+            // Create new proposal
+            let proposal = GuardianOverrideProposal {
+                proposer: caller,
+                votes_for: 1, // Proposer automatically votes for
+                votes_against: 0,
+                creation_timestamp: get_block_timestamp(),
+                executed: false,
+            };
+            
+            self.guardian_override_proposals.write(proposal_id, proposal);
+            self.guardian_votes.write((proposal_id, caller), true);
+            
+            self.emit(Event::GuardianOverrideProposed(GuardianOverrideProposed {
+                proposal_id,
+                proposer: caller,
+                timestamp: get_block_timestamp(),
+            }));
+        }
+
+        fn guardian_vote_rate_limit_override(ref self: ContractState, proposal_id: u256, approve: bool) {
+            let caller = get_caller_address();
+            assert(self.guardians.read(caller), Errors::NOT_GUARDIAN);
+            
+            // Check proposal exists
+            let mut proposal = self.guardian_override_proposals.read(proposal_id);
+            assert(!proposal.proposer.is_zero(), Errors::PROPOSAL_NOT_FOUND);
+            assert(!proposal.executed, Errors::PROPOSAL_ALREADY_EXECUTED);
+            
+            // Check guardian hasn't already voted
+            assert(!self.guardian_votes.read((proposal_id, caller)), Errors::ALREADY_VOTED);
+            
+            // Record vote
+            self.guardian_votes.write((proposal_id, caller), true);
+            
+            if approve {
+                proposal.votes_for += 1;
+            } else {
+                proposal.votes_against += 1;
+            }
+            
+            self.guardian_override_proposals.write(proposal_id, proposal);
+            
+            self.emit(Event::GuardianOverrideVote(GuardianOverrideVote {
+                proposal_id,
+                guardian: caller,
+                approve,
+            }));
+        }
+
+        fn execute_guardian_rate_limit_override(ref self: ContractState, proposal_id: u256) {
+            // Allow any guardian to execute if threshold is met
+            let caller = get_caller_address();
+            assert(self.guardians.read(caller), Errors::NOT_GUARDIAN);
+            
+            let mut proposal = self.guardian_override_proposals.read(proposal_id);
+            assert(!proposal.proposer.is_zero(), Errors::PROPOSAL_NOT_FOUND);
+            assert(!proposal.executed, Errors::PROPOSAL_ALREADY_EXECUTED);
+            
+            let threshold = self.guardian_threshold.read();
+            assert(proposal.votes_for >= threshold, Errors::INSUFFICIENT_VOTES);
+            
+            // Execute the override
+            proposal.executed = true;
+            self.guardian_override_proposals.write(proposal_id, proposal);
+            
+            // Clear the rate limit
+            self.is_rate_limited.write(false);
+            
+            self.emit(Event::GuardianOverrideExecuted(GuardianOverrideExecuted {
+                proposal_id,
+                timestamp: get_block_timestamp(),
+            }));
+        }
+
+        fn set_guardian_threshold(ref self: ContractState, new_threshold: u32) {
+            self._assert_only_admin();
+            let guardian_count = self.guardian_count.read();
+            assert(new_threshold > 0 && new_threshold <= guardian_count, Errors::INVALID_THRESHOLD);
+            
+            let old_threshold = self.guardian_threshold.read();
+            self.guardian_threshold.write(new_threshold);
+            
+            self.emit(Event::GuardianThresholdChanged(GuardianThresholdChanged {
+                old_threshold,
+                new_threshold,
+            }));
+        }
+
+        // ==================== GUARDIAN MONITORING FUNCTIONS ====================
+
+        fn get_guardian_override_proposal(self: @ContractState, proposal_id: u256) -> (ContractAddress, u32, u32, u64, bool) {
+            let proposal = self.guardian_override_proposals.read(proposal_id);
+            (proposal.proposer, proposal.votes_for, proposal.votes_against, proposal.creation_timestamp, proposal.executed)
+        }
+
+        fn guardian_threshold(self: @ContractState) -> u32 {
+            self.guardian_threshold.read()
+        }
+
+        fn has_guardian_voted(self: @ContractState, proposal_id: u256, guardian: ContractAddress) -> bool {
+            self.guardian_votes.read((proposal_id, guardian))
         }
     }
 
