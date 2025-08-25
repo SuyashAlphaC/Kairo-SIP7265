@@ -92,6 +92,7 @@ pub mod CircuitBreaker {
     impl PausableImpl = PausableComponent::PausableImpl<ContractState>;
     impl PausableInternalImpl = PausableComponent::InternalImpl<ContractState>;
 
+
     #[derive(Drop)]
     struct NodeMapWrapper {
         state: @ContractState,
@@ -114,6 +115,8 @@ pub mod CircuitBreaker {
         pausable: PausableComponent::Storage,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
+        guardians: Map<ContractAddress, bool>,
+        guardian_count: u32,
 
         token_limiters: Map<ContractAddress, Limiter>,
         locked_funds: Map<(ContractAddress, ContractAddress), u256>, // (recipient, asset) -> amount
@@ -175,6 +178,7 @@ pub mod CircuitBreaker {
     ) {
         self.admin.write(admin);
         self.ownable.initializer(admin);
+        self.guardian_count.write(0);
         self.rate_limit_cooldown_period.write(rate_limit_cooldown_period);
         self.withdrawal_period.write(withdrawal_period);
         self.tick_length.write(tick_length);
@@ -302,10 +306,8 @@ pub mod CircuitBreaker {
             assert(self.is_rate_limited.read(), Errors::NOT_RATE_LIMITED);
 
             self.is_rate_limited.write(false);
-            // Allow the grace period to extend for the full withdrawal period
-            let withdrawal_period = self.withdrawal_period.read();
-            let last_limit_time = self.last_rate_limit_timestamp.read();
-            self.grace_period_end_timestamp.write(last_limit_time + withdrawal_period);
+            // Don't set a grace period - allow new breaches to be detected immediately
+            // The admin override is for the current rate limit state, not a blanket immunity
         }
 
         fn add_protected_contracts(ref self: ContractState, protected_contracts: Array<ContractAddress>) {
@@ -429,6 +431,36 @@ pub mod CircuitBreaker {
         fn native_address_proxy(self: @ContractState) -> ContractAddress {
             self.native_address_proxy.read()
         }
+
+        // Guardian functions
+        fn add_guardian(ref self: ContractState, guardian: ContractAddress) {
+            self._assert_only_admin();
+            assert(!guardian.is_zero(), 'Invalid guardian address');
+            assert(!self.guardians.read(guardian), 'Guardian already exists');
+            
+            self.guardians.write(guardian, true);
+            let count = self.guardian_count.read();
+            self.guardian_count.write(count + 1);
+        }
+
+        fn remove_guardian(ref self: ContractState, guardian: ContractAddress) {
+            self._assert_only_admin();
+            assert(self.guardians.read(guardian), 'Guardian not found');
+            
+            self.guardians.write(guardian, false);
+            let count = self.guardian_count.read();
+            if count > 0 {
+                self.guardian_count.write(count - 1);
+            }
+        }
+
+        fn is_guardian(self: @ContractState, address: ContractAddress) -> bool {
+            self.guardians.read(address)
+        }
+
+        fn guardian_count(self: @ContractState) -> u32 {
+            self.guardian_count.read()
+        }
     }
 
     // Storage wrapper for MapTrait implementation
@@ -490,8 +522,9 @@ pub mod CircuitBreaker {
                 limiter.list_head = current_head;
             }
 
-            // Remove old changes from both totals when they're outside the period  
-            limiter.liq_total = limiter.liq_total.add(total_change);
+            // When old changes expire from the tracking window:
+            // - Remove them from liq_in_period (they're no longer "recent changes")  
+            // - liq_total remains unchanged as it represents current actual liquidity
             limiter.liq_in_period = limiter.liq_in_period.sub(total_change);
 
             self.token_limiters.write(token, limiter);
@@ -500,6 +533,11 @@ pub mod CircuitBreaker {
         fn _record_change_with_lib(ref self: ContractState, token: ContractAddress, amount: SignedU256) {
             let mut limiter = self.token_limiters.read(token);
             if !limiter.initialized {
+                return;
+            }
+
+            // Skip zero amounts to avoid unnecessary tracking
+            if amount.value == 0 {
                 return;
             }
 
@@ -566,6 +604,11 @@ pub mod CircuitBreaker {
             recipient: ContractAddress,
             revert_on_rate_limit: bool
         ) {
+            // Handle zero withdrawal - no need to track or check limits
+            if amount == 0 {
+                return;
+            }
+
             let mut limiter = self.token_limiters.read(token);
             
             // Check if the token has enforced rate limit

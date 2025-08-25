@@ -75,4 +75,10 @@ pub trait ICircuitBreaker<TContractState> {
     fn withdrawal_period(self: @TContractState) -> u64;
     fn tick_length(self: @TContractState) -> u64;
     fn native_address_proxy(self: @TContractState) -> ContractAddress;
+
+    // Simple guardian functions
+    fn add_guardian(ref self: TContractState, guardian: ContractAddress);
+    fn remove_guardian(ref self: TContractState, guardian: ContractAddress);
+    fn is_guardian(self: @TContractState, address: ContractAddress) -> bool;
+    fn guardian_count(self: @TContractState) -> u32;
 }

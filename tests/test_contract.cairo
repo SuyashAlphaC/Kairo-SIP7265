@@ -411,4 +411,448 @@ mod tests {
         // Verify migration successful
         assert_eq!(circuit_breaker.is_operational(), false);
     }
+
+    // ==================== GUARDIAN MANAGEMENT TESTS ====================
+
+    #[test]
+    fn test_add_guardian() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let guardian1 = contract_address_const::<'guardian1'>();
+        let guardian2 = contract_address_const::<'guardian2'>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        
+        // Add first guardian
+        circuit_breaker.add_guardian(guardian1);
+        assert_eq!(circuit_breaker.is_guardian(guardian1), true);
+        assert_eq!(circuit_breaker.guardian_count(), 1);
+        
+        // Add second guardian
+        circuit_breaker.add_guardian(guardian2);
+        assert_eq!(circuit_breaker.is_guardian(guardian2), true);
+        assert_eq!(circuit_breaker.guardian_count(), 2);
+        
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    #[test]
+    fn test_remove_guardian() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let guardian1 = contract_address_const::<'guardian1'>();
+        let guardian2 = contract_address_const::<'guardian2'>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        
+        // Add guardians
+        circuit_breaker.add_guardian(guardian1);
+        circuit_breaker.add_guardian(guardian2);
+        assert_eq!(circuit_breaker.guardian_count(), 2);
+        
+        // Remove first guardian
+        circuit_breaker.remove_guardian(guardian1);
+        assert_eq!(circuit_breaker.is_guardian(guardian1), false);
+        assert_eq!(circuit_breaker.guardian_count(), 1);
+        assert_eq!(circuit_breaker.is_guardian(guardian2), true);
+        
+        // Remove second guardian
+        circuit_breaker.remove_guardian(guardian2);
+        assert_eq!(circuit_breaker.guardian_count(), 0);
+        
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    #[test]
+    fn test_guardian_count_consistency() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let guardian1 = contract_address_const::<'guardian1'>();
+        let guardian2 = contract_address_const::<'guardian2'>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        
+        // Initial count should be 0
+        assert_eq!(circuit_breaker.guardian_count(), 0);
+        
+        // Add and verify count increments
+        circuit_breaker.add_guardian(guardian1);
+        assert_eq!(circuit_breaker.guardian_count(), 1);
+        
+        circuit_breaker.add_guardian(guardian2);
+        assert_eq!(circuit_breaker.guardian_count(), 2);
+        
+        // Remove and verify count decrements
+        circuit_breaker.remove_guardian(guardian1);
+        assert_eq!(circuit_breaker.guardian_count(), 1);
+        
+        circuit_breaker.remove_guardian(guardian2);
+        assert_eq!(circuit_breaker.guardian_count(), 0);
+        
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    // ==================== GUARDIAN EDGE CASE TESTS ====================
+
+    #[test]
+    #[should_panic(expected: ('Invalid guardian address',))]
+    fn test_add_guardian_zero_address() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let zero_address = contract_address_const::<0>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.add_guardian(zero_address);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    #[test]
+    #[should_panic(expected: ('Guardian already exists',))]
+    fn test_add_duplicate_guardian() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let guardian = contract_address_const::<'guardian'>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        
+        // Add guardian first time (should succeed)
+        circuit_breaker.add_guardian(guardian);
+        
+        // Try to add same guardian again (should panic)
+        circuit_breaker.add_guardian(guardian);
+        
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    #[test]
+    #[should_panic(expected: ('Guardian not found',))]
+    fn test_remove_nonexistent_guardian() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let guardian = contract_address_const::<'guardian'>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.remove_guardian(guardian);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    #[test]
+    #[should_panic(expected: ('Guardian not found',))]
+    fn test_remove_guardian_twice() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let guardian = contract_address_const::<'guardian'>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        
+        // Add and remove guardian
+        circuit_breaker.add_guardian(guardian);
+        circuit_breaker.remove_guardian(guardian);
+        
+        // Try to remove again (should panic)
+        circuit_breaker.remove_guardian(guardian);
+        
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    // ==================== GUARDIAN AUTHORIZATION TESTS ====================
+
+    #[test]
+    #[should_panic(expected: ('Not admin',))]
+    fn test_add_guardian_unauthorized() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let unauthorized = contract_address_const::<'unauthorized'>();
+        let guardian = contract_address_const::<'guardian'>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, unauthorized);
+        circuit_breaker.add_guardian(guardian);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    #[test]
+    #[should_panic(expected: ('Not admin',))]
+    fn test_remove_guardian_unauthorized() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let unauthorized = contract_address_const::<'unauthorized'>();
+        let guardian = contract_address_const::<'guardian'>();
+
+        // Admin adds guardian first
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.add_guardian(guardian);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+
+        // Unauthorized user tries to remove
+        start_cheat_caller_address(circuit_breaker.contract_address, unauthorized);
+        circuit_breaker.remove_guardian(guardian);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    #[test]
+    #[should_panic(expected: ('Not admin',))]
+    fn test_guardian_cannot_add_other_guardians() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let guardian1 = contract_address_const::<'guardian1'>();
+        let guardian2 = contract_address_const::<'guardian2'>();
+
+        // Admin adds first guardian
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.add_guardian(guardian1);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+
+        // Guardian tries to add another guardian (should fail)
+        start_cheat_caller_address(circuit_breaker.contract_address, guardian1);
+        circuit_breaker.add_guardian(guardian2);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
+
+    // ==================== CIRCUIT BREAKER EDGE CASE TESTS ====================
+
+    #[test]
+    fn test_multiple_assets_independent_rate_limits() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let alice = contract_address_const::<'alice'>();
+        let token1 = deploy_mock_token();
+        let token2 = deploy_mock_token();
+        let defi = deploy_mock_defi(circuit_breaker.contract_address);
+
+        // Setup both assets with different thresholds
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.register_asset(
+            token1.contract_address,
+            5000, // 50% retention
+            1000000000000000000000 // 1000 tokens minimum
+        );
+        circuit_breaker.register_asset(
+            token2.contract_address,
+            8000, // 80% retention  
+            1000000000000000000000 // 1000 tokens minimum
+        );
+        
+        let mut protected_contracts = array![defi.contract_address];
+        circuit_breaker.add_protected_contracts(protected_contracts);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+
+        // Mint and deposit both tokens
+        let amount: u256 = 10000000000000000000000; // 10000 tokens each
+        token1.mock.mint(alice, amount);
+        token2.mock.mint(alice, amount);
+        
+        start_cheat_caller_address(token1.contract_address, alice);
+        token1.erc20.approve(defi.contract_address, amount);
+        stop_cheat_caller_address(token1.contract_address);
+        
+        start_cheat_caller_address(token2.contract_address, alice);
+        token2.erc20.approve(defi.contract_address, amount);
+        stop_cheat_caller_address(token2.contract_address);
+        
+        start_cheat_caller_address(defi.contract_address, alice);
+        defi.deposit(token1.contract_address, amount);
+        defi.deposit(token2.contract_address, amount);
+        stop_cheat_caller_address(defi.contract_address);
+
+        start_cheat_block_timestamp(circuit_breaker.contract_address, 18000);
+
+        // Withdraw from token1 within limits (40% of 10000 = 4000)
+        start_cheat_caller_address(defi.contract_address, alice);
+        defi.withdrawal(token1.contract_address, 4000000000000000000000);
+        stop_cheat_caller_address(defi.contract_address);
+        
+        // Should not trigger global rate limit yet
+        assert_eq!(circuit_breaker.is_rate_limited(), false);
+        assert_eq!(circuit_breaker.is_rate_limit_triggered(token1.contract_address), false);
+
+        // Withdraw from token2 beyond limits (30% of 10000 = 3000, but limit is 20%)
+        start_cheat_caller_address(defi.contract_address, alice);
+        defi.withdrawal(token2.contract_address, 3000000000000000000000);
+        stop_cheat_caller_address(defi.contract_address);
+        
+        stop_cheat_block_timestamp(circuit_breaker.contract_address);
+        
+        // Should trigger rate limit due to token2
+        assert_eq!(circuit_breaker.is_rate_limited(), true);
+        assert_eq!(circuit_breaker.is_rate_limit_triggered(token1.contract_address), false);
+        assert_eq!(circuit_breaker.is_rate_limit_triggered(token2.contract_address), true);
+    }
+
+    #[test]
+    fn test_admin_change_updates_guardian_system() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let new_admin = contract_address_const::<'new_admin'>();
+        let guardian = contract_address_const::<'guardian'>();
+
+        // Original admin adds guardian
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.add_guardian(guardian);
+        circuit_breaker.set_admin(new_admin);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+
+        // New admin should be able to manage guardians
+        start_cheat_caller_address(circuit_breaker.contract_address, new_admin);
+        let guardian2 = contract_address_const::<'guardian2'>();
+        circuit_breaker.add_guardian(guardian2);
+        assert_eq!(circuit_breaker.guardian_count(), 2);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+
+        // Verify old admin can no longer manage guardians by checking current admin
+        assert_eq!(circuit_breaker.admin(), new_admin);
+    }
+
+    #[test]
+    fn test_zero_withdrawal_doesnt_trigger_limits() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let alice = contract_address_const::<'alice'>();
+        let token = deploy_mock_token();
+        let defi = deploy_mock_defi(circuit_breaker.contract_address);
+
+        // Setup
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.register_asset(
+            token.contract_address,
+            9000, // 90% retention (very strict)
+            1000000000000000000000
+        );
+        
+        let mut protected_contracts = array![defi.contract_address];
+        circuit_breaker.add_protected_contracts(protected_contracts);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+
+        // Deposit tokens
+        let amount: u256 = 1000000000000000000000; // 1000 tokens
+        token.mock.mint(alice, amount);
+        
+        start_cheat_caller_address(token.contract_address, alice);
+        token.erc20.approve(defi.contract_address, amount);
+        stop_cheat_caller_address(token.contract_address);
+        
+        start_cheat_caller_address(defi.contract_address, alice);
+        defi.deposit(token.contract_address, amount);
+        stop_cheat_caller_address(defi.contract_address);
+
+        start_cheat_block_timestamp(circuit_breaker.contract_address, 1000);
+
+        // Multiple zero withdrawals followed by a small valid withdrawal
+        start_cheat_caller_address(defi.contract_address, alice);
+        defi.withdrawal(token.contract_address, 0);
+        defi.withdrawal(token.contract_address, 0);
+        defi.withdrawal(token.contract_address, 0);
+        // Small withdrawal within limits (1% of 1000 = 10 tokens, should be fine)
+        defi.withdrawal(token.contract_address, 10000000000000000000); // 10 tokens
+        stop_cheat_caller_address(defi.contract_address);
+        
+        stop_cheat_block_timestamp(circuit_breaker.contract_address);
+        
+        // Should not trigger any limits since we only withdrew 1% (much less than the 10% limit)
+        assert_eq!(circuit_breaker.is_rate_limited(), false);
+        assert_eq!(circuit_breaker.is_rate_limit_triggered(token.contract_address), false);
+    }
+
+    // ==================== COMPREHENSIVE INTEGRATION TESTS ====================
+
+    #[test]
+    fn test_full_lifecycle_with_guardians() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        let guardian = contract_address_const::<'guardian'>();
+        let alice = contract_address_const::<'alice'>();
+        let recovery = contract_address_const::<'recovery'>();
+        let token = deploy_mock_token();
+        let defi = deploy_mock_defi(circuit_breaker.contract_address);
+
+        // Phase 1: Setup system with guardian
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.add_guardian(guardian);
+        circuit_breaker.register_asset(
+            token.contract_address,
+            7000,
+            1000000000000000000000
+        );
+        
+        let mut protected_contracts = array![defi.contract_address];
+        circuit_breaker.add_protected_contracts(protected_contracts);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+
+        // Phase 2: Normal operation
+        let amount: u256 = 10000000000000000000000;
+        token.mock.mint(alice, amount);
+        
+        start_cheat_caller_address(token.contract_address, alice);
+        token.erc20.approve(defi.contract_address, amount);
+        stop_cheat_caller_address(token.contract_address);
+        
+        start_cheat_caller_address(defi.contract_address, alice);
+        defi.deposit(token.contract_address, amount);
+        stop_cheat_caller_address(defi.contract_address);
+
+        // Phase 3: Trigger rate limit
+        start_cheat_block_timestamp(circuit_breaker.contract_address, 18000);
+        start_cheat_caller_address(defi.contract_address, alice);
+        defi.withdrawal(token.contract_address, 5000000000000000000000); // 50% withdrawal
+        stop_cheat_caller_address(defi.contract_address);
+        
+        assert_eq!(circuit_breaker.is_rate_limited(), true);
+        assert_eq!(circuit_breaker.guardian_count(), 1);
+        assert_eq!(circuit_breaker.is_guardian(guardian), true);
+
+        // Phase 4: Admin override and fund recovery
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        circuit_breaker.override_rate_limit();
+        circuit_breaker.mark_as_not_operational();
+        
+        let mut assets = array![token.contract_address];
+        circuit_breaker.migrate_funds_after_exploit(assets, recovery);
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+        
+        stop_cheat_block_timestamp(circuit_breaker.contract_address);
+        
+        // Phase 5: Verify final state
+        assert_eq!(circuit_breaker.is_operational(), false);
+        assert_eq!(circuit_breaker.is_rate_limited(), false);
+        assert_eq!(circuit_breaker.is_guardian(guardian), true); // Guardian should still exist
+    }
+
+    #[test]
+    fn test_stress_multiple_guardians_and_operations() {
+        let circuit_breaker = deploy_circuit_breaker();
+        let admin = contract_address_const::<'admin'>();
+        
+        // Add multiple guardians
+        let guardian1 = contract_address_const::<'guardian1'>();
+        let guardian2 = contract_address_const::<'guardian2'>();
+        let guardian3 = contract_address_const::<'guardian3'>();
+        let guardian4 = contract_address_const::<'guardian4'>();
+        let guardian5 = contract_address_const::<'guardian5'>();
+
+        start_cheat_caller_address(circuit_breaker.contract_address, admin);
+        
+        circuit_breaker.add_guardian(guardian1);
+        circuit_breaker.add_guardian(guardian2);
+        circuit_breaker.add_guardian(guardian3);
+        circuit_breaker.add_guardian(guardian4);
+        circuit_breaker.add_guardian(guardian5);
+        
+        assert_eq!(circuit_breaker.guardian_count(), 5);
+
+        // Remove some guardians
+        circuit_breaker.remove_guardian(guardian2);
+        circuit_breaker.remove_guardian(guardian4);
+        
+        assert_eq!(circuit_breaker.guardian_count(), 3);
+        assert_eq!(circuit_breaker.is_guardian(guardian1), true);
+        assert_eq!(circuit_breaker.is_guardian(guardian2), false);
+        assert_eq!(circuit_breaker.is_guardian(guardian3), true);
+        assert_eq!(circuit_breaker.is_guardian(guardian4), false);
+        assert_eq!(circuit_breaker.is_guardian(guardian5), true);
+
+        // Add back one guardian
+        circuit_breaker.add_guardian(guardian2);
+        assert_eq!(circuit_breaker.guardian_count(), 4);
+        assert_eq!(circuit_breaker.is_guardian(guardian2), true);
+        
+        stop_cheat_caller_address(circuit_breaker.contract_address);
+    }
 }
